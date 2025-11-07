@@ -28,8 +28,9 @@ def cross_entropy(pred,
         avg_factor (int, optional): Average factor that is used to average
             the loss. Defaults to None.
         class_weight (list[float], optional): The weight for each class.
-        ignore_index (int | None): The label index to be ignored.
+        ignore_index (int | list[int] | tuple[int] | None): The label index(es) to be ignored.
             If None, it will be set to default value. Default: -100.
+            Supports multiple values: e.g., [0, 255] to ignore both 0 and 255.
         avg_non_ignore (bool): The flag decides to whether the loss is
             only averaged over non-ignored targets. Default: False.
 
@@ -37,21 +38,44 @@ def cross_entropy(pred,
         torch.Tensor: The calculated loss
     """
     # The default value of ignore_index is the same as F.cross_entropy
-    ignore_index = -100 if ignore_index is None else ignore_index
+    if ignore_index is None:
+        ignore_index = -100
+    
+    # Handle multiple ignore_index values
+    if isinstance(ignore_index, int):
+        ignore_indices = [ignore_index]
+    elif isinstance(ignore_index, (list, tuple)):
+        ignore_indices = list(ignore_index)
+    else:
+        ignore_indices = [ignore_index]
+    
+    # Create a copy of label to modify
+    label_processed = label.clone()
+    
+    # Map all ignore indices to -100 (PyTorch's standard ignore_index)
+    for idx in ignore_indices:
+        label_processed[label_processed == idx] = -100
+    
+    # Use -100 as the single ignore_index for PyTorch
+    pytorch_ignore_index = -100
 
     # element-wise losses
     loss = F.cross_entropy(
         pred,
-        label,
+        label_processed,
         weight=class_weight,
         reduction='none',
-        ignore_index=ignore_index)
+        ignore_index=pytorch_ignore_index)
 
     # average loss over non-ignored elements
     # pytorch's official cross_entropy average loss over non-ignored elements
     # refer to https://github.com/pytorch/pytorch/blob/56b43f4fec1f76953f15a627694d4bba34588969/torch/nn/functional.py#L2660  # noqa
     if (avg_factor is None) and avg_non_ignore and reduction == 'mean':
-        avg_factor = label.numel() - (label == ignore_index).sum().item()
+        # Count non-ignored elements across all ignore indices
+        valid_mask = torch.ones_like(label, dtype=torch.bool)
+        for idx in ignore_indices:
+            valid_mask = valid_mask & (label != idx)
+        avg_factor = valid_mask.sum().item()
 
     # apply weights and do the reduction
     if weight is not None:
@@ -65,7 +89,20 @@ def cross_entropy(pred,
 def _expand_onehot_labels(labels, label_weights, label_channels, ignore_index):
     """Expand onehot labels to match the size of prediction."""
     bin_labels = labels.new_full((labels.size(0), label_channels), 0)
-    valid_mask = (labels >= 0) & (labels != ignore_index)
+    
+    # Handle multiple ignore_index values
+    if isinstance(ignore_index, int):
+        ignore_indices = [ignore_index]
+    elif isinstance(ignore_index, (list, tuple)):
+        ignore_indices = list(ignore_index)
+    else:
+        ignore_indices = [ignore_index]
+    
+    # Build valid_mask for all ignore indices
+    valid_mask = (labels >= 0)
+    for idx in ignore_indices:
+        valid_mask = valid_mask & (labels != idx)
+    
     inds = torch.nonzero(
         valid_mask & (labels < label_channels), as_tuple=False)
 
@@ -106,8 +143,9 @@ def binary_cross_entropy(pred,
         avg_factor (int, optional): Average factor that is used to average
             the loss. Defaults to None.
         class_weight (list[float], optional): The weight for each class.
-        ignore_index (int | None): The label index to be ignored.
+        ignore_index (int | list[int] | tuple[int] | None): The label index(es) to be ignored.
             If None, it will be set to default value. Default: -100.
+            Supports multiple values: e.g., [0, 255] to ignore both 0 and 255.
         avg_non_ignore (bool): The flag decides to whether the loss is
             only averaged over non-ignored targets. Default: False.
 
@@ -115,14 +153,26 @@ def binary_cross_entropy(pred,
         torch.Tensor: The calculated loss.
     """
     # The default value of ignore_index is the same as F.cross_entropy
-    ignore_index = -100 if ignore_index is None else ignore_index
+    if ignore_index is None:
+        ignore_index = -100
 
     if pred.dim() != label.dim():
         label, weight, valid_mask = _expand_onehot_labels(
             label, weight, pred.size(-1), ignore_index)
     else:
-        # should mask out the ignored elements
-        valid_mask = ((label >= 0) & (label != ignore_index)).float()
+        # Handle multiple ignore_index values
+        if isinstance(ignore_index, int):
+            ignore_indices = [ignore_index]
+        elif isinstance(ignore_index, (list, tuple)):
+            ignore_indices = list(ignore_index)
+        else:
+            ignore_indices = [ignore_index]
+        
+        # Build valid_mask for all ignore indices
+        valid_mask = (label >= 0).float()
+        for idx in ignore_indices:
+            valid_mask = valid_mask * (label != idx).float()
+        
         if weight is not None:
             # The inplace writing method will have a mismatched broadcast
             # shape error if the weight and valid_mask dimensions
@@ -220,7 +270,8 @@ class CrossEntropyLoss(nn.Module):
                 Options are "none", "mean" and "sum".
             class_weight (list[float], optional): Weight of each class.
                 Defaults to None.
-            ignore_index (int | None): The label index to be ignored.
+            ignore_index (int | list[int] | tuple[int] | None): The label index(es) to be ignored.
+                Supports multiple values: e.g., [0, 255] to ignore both 0 and 255.
                 Defaults to None.
             loss_weight (float, optional): Weight of the loss. Defaults to 1.0.
             avg_non_ignore (bool): The flag decides to whether the loss is
@@ -273,7 +324,8 @@ class CrossEntropyLoss(nn.Module):
                 the loss. Defaults to None.
             reduction_override (str, optional): The method used to reduce the
                 loss. Options are "none", "mean" and "sum".
-            ignore_index (int | None): The label index to be ignored.
+            ignore_index (int | list[int] | tuple[int] | None): The label index(es) to be ignored.
+                Supports multiple values: e.g., [0, 255] to ignore both 0 and 255.
                 If not None, it will override the default value. Default: None.
         Returns:
             torch.Tensor: The calculated loss.

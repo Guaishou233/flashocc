@@ -146,13 +146,22 @@ def sigmoid_focal_loss(pred,
                 # For most cases, weight is of shape (num_priors, ),
                 #  which means it does not have the second axis num_class
                 weight = weight.view(-1, 1)
+            elif weight.size(0) == loss.size(1):
+                # weight is of shape (num_classes, ), need to broadcast to (num_priors, num_classes)
+                weight = weight.view(1, -1).expand_as(loss)
             else:
                 # Sometimes, weight per anchor per class is also needed. e.g.
                 #  in FSAF. But it may be flattened of shape
                 #  (num_priors x num_class, ), while loss is still of shape
                 #  (num_priors, num_class).
-                assert weight.numel() == loss.numel()
-                weight = weight.view(loss.size(0), -1)
+                if weight.numel() == loss.numel():
+                    weight = weight.view(loss.size(0), -1)
+                elif weight.numel() == loss.size(1):
+                    # weight is (num_classes, ), broadcast to (num_priors, num_classes)
+                    weight = weight.view(1, -1).expand_as(loss)
+                else:
+                    raise ValueError(f"weight shape {weight.shape} cannot be broadcast to loss shape {loss.shape}. "
+                                   f"Expected weight to have shape (num_priors,), (num_classes,), or (num_priors, num_classes).")
         assert weight.ndim == loss.ndim
         loss = loss * weight
     loss = loss.sum(-1).mean()
@@ -224,17 +233,99 @@ class CustomFocalLoss(nn.Module):
         Returns:
             torch.Tensor: The calculated loss
         """
-        B, H, W, D = target.shape
+        # 处理target的形状：如果是6维(B, 1, 1, Dx, Dy, Dz)，先reshape成4维(B, Dx, Dy, Dz)
+        if target.dim() == 6:
+            # (B, 1, 1, Dx, Dy, Dz) -> (B, Dx, Dy, Dz)
+            target = target.squeeze(1).squeeze(1)
+        elif target.dim() == 5:
+            # 如果已经是5维，可能需要处理
+            # (B, C, Dx, Dy, Dz) -> (B, Dx, Dy, Dz) 取第一个通道或者reshape
+            if target.size(1) == 1:
+                target = target.squeeze(1)
+        
+        # 现在target应该是(B, Dx, Dy, Dz)或(B, H, W, D)
+        # 代码期望的是(B, H, W, D)格式，其中D是最后一个维度
+        if target.dim() == 4:
+            B, H, W, D = target.shape
+        elif target.dim() == 3:
+            # 如果是3维，可能是(B, H, W)或(B, H*W, D)
+            # 根据实际情况处理
+            B = target.shape[0]
+            if target.shape[-1] > target.shape[1]:
+                # 可能是(B, H, D)格式，需要reshape
+                H, W, D = target.shape[1:]
+            else:
+                # 可能是(B, H, W)格式，需要添加D维度
+                H, W = target.shape[1:]
+                D = 1
+                target = target.unsqueeze(-1)
+        else:
+            raise ValueError(f"Unexpected target shape: {target.shape}")
 
-        c = self.c[None, :, :, None].repeat(B, 1, 1, D).reshape(-1)
+        # 动态创建c矩阵，如果H和W与self.c的尺寸不同
+        if H == self.c.shape[0] and W == self.c.shape[1]:
+            c = self.c[None, :, :, None].repeat(B, 1, 1, D).reshape(-1)
+        else:
+            # 根据实际的H和W动态创建c，与初始化代码保持一致
+            xy, yx = torch.meshgrid([torch.arange(H, device=target.device, dtype=target.dtype) - H / 2, 
+                                     torch.arange(W, device=target.device, dtype=target.dtype) - W / 2])
+            c = torch.stack([xy, yx], 2)
+            c = torch.norm(c, 2, -1)
+            c_max = c.max()
+            if c_max > 0:
+                c = (c / c_max + 1)
+            else:
+                c = torch.ones_like(c)
+            c = c[None, :, :, None].repeat(B, 1, 1, D).reshape(-1)
 
         visible_mask = (target != ignore_index).reshape(-1).nonzero().squeeze(-1)
-        weight_mask = weight[None, :] * c[visible_mask, None]
-        # visible_mask[:, None]
-
+        
         num_classes = pred.size(1)
         pred = pred.permute(0, 2, 3, 4, 1).reshape(-1, num_classes)[visible_mask]
         target = target.reshape(-1)[visible_mask]
+        
+        # 处理weight的形状：确保weight_mask的形状与pred和target匹配
+        if weight is not None:
+            num_visible = visible_mask.size(0)
+            if weight.dim() == 1:
+                # weight是(num_classes,)，需要广播到(num_visible, num_classes)
+                if weight.size(0) == num_classes:
+                    # weight是(num_classes,)，广播到(num_visible, num_classes)
+                    # weight_mask = weight[None, :] * c[visible_mask, None]  # (num_visible, num_classes)
+                    # 或者直接使用weight，让loss函数处理
+                    weight_mask = weight[None, :].expand(num_visible, num_classes) * c[visible_mask, None]
+                else:
+                    # weight可能是其他形状，尝试reshape
+                    weight_mask = weight[visible_mask] if weight.size(0) >= num_visible else weight
+            elif weight.dim() == 2:
+                # weight已经是(B*H*W*D, num_classes)或(B*H*W*D, 1)
+                if weight.size(0) == B * H * W * D:
+                    # weight是(B*H*W*D, num_classes)或(B*H*W*D, 1)
+                    weight_mask = weight[visible_mask]  # (num_visible, num_classes)或(num_visible, 1)
+                    # 如果需要，将其与c相乘
+                    if weight_mask.size(1) == 1:
+                        weight_mask = weight_mask * c[visible_mask, None]  # (num_visible, 1)
+                        # 如果需要扩展到(num_visible, num_classes)
+                        weight_mask = weight_mask.expand(num_visible, num_classes)
+                    else:
+                        weight_mask = weight_mask * c[visible_mask, None]  # (num_visible, num_classes)
+                else:
+                    # weight的形状不匹配，尝试reshape
+                    # 如果weight的总元素数等于B*H*W*D*num_classes，尝试reshape
+                    if weight.numel() == B * H * W * D * num_classes:
+                        weight_mask = weight.view(B * H * W * D, num_classes)[visible_mask]
+                    elif weight.numel() == B * H * W * D:
+                        weight_mask = weight.view(B * H * W * D, 1)[visible_mask]
+                        weight_mask = weight_mask * c[visible_mask, None]
+                        weight_mask = weight_mask.expand(num_visible, num_classes)
+                    else:
+                        # 如果都不匹配，尝试直接使用
+                        weight_mask = weight[visible_mask] if weight.size(0) >= num_visible else weight
+            else:
+                # weight是其他维度，尝试reshape
+                weight_mask = weight.view(-1, weight.size(-1))[visible_mask] if weight.numel() >= num_visible * num_classes else weight
+        else:
+            weight_mask = None
 
         assert reduction_override in (None, 'none', 'mean', 'sum')
         reduction = (

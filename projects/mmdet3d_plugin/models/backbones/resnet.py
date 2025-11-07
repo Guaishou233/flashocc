@@ -81,6 +81,92 @@ class CustomResNet(nn.Module):
         return feats
 
 
+@BACKBONES.register_module()
+class CustomResNetV2(nn.Module):
+    """
+    新的CustomResNet版本，用于解决输入channel为60时的维度匹配问题
+    确保输出的通道数能够匹配FPN拼接的需求
+    """
+    def __init__(
+            self,
+            numC_input,
+            num_layer=[2, 2, 2],
+            num_channels=None,
+            stride=[2, 2, 2],
+            backbone_output_ids=None,
+            norm_cfg=dict(type='BN'),
+            with_cp=False,
+            block_type='Basic',
+    ):
+        super(CustomResNetV2, self).__init__()
+        # build backbone
+        assert len(num_layer) == len(stride)
+        # 对于输入60的情况，使用更合理的通道数分配
+        # 确保feats[0]和feats[2]的通道数能够匹配拼接需求
+        if num_channels is None:
+            if numC_input == 60:
+                # 针对60的特殊处理：输出通道设为[32, 64, 32]
+                # 这样feats[0]和feats[2]都是32，可以成功拼接
+                num_channels = [32, 64, 32]
+            else:
+                # 其他情况使用原来的计算方式
+                num_channels = [numC_input*2**(i+1) for i in range(len(num_layer))]
+        self.numC_input = numC_input
+        self.backbone_output_ids = range(len(num_layer)) \
+            if backbone_output_ids is None else backbone_output_ids
+
+        layers = []
+        if block_type == 'BottleNeck':
+            curr_numC = numC_input
+            for i in range(len(num_layer)):
+                # 在第一个block中对输入进行downsample
+                layer = [Bottleneck(inplanes=curr_numC, planes=num_channels[i]//4, stride=stride[i],
+                                    downsample=nn.Conv2d(curr_numC, num_channels[i], 3, stride[i], 1),
+                                    norm_cfg=norm_cfg)]
+                curr_numC = num_channels[i]
+                layer.extend([Bottleneck(inplanes=curr_numC, planes=num_channels[i]//4, stride=1,
+                                         downsample=None, norm_cfg=norm_cfg) for _ in range(num_layer[i] - 1)])
+                layers.append(nn.Sequential(*layer))
+        elif block_type == 'Basic':
+            curr_numC = numC_input
+            for i in range(len(num_layer)):
+                # 在第一个block中对输入进行downsample
+                layer = [BasicBlock(inplanes=curr_numC, planes=num_channels[i], stride=stride[i],
+                                    downsample=nn.Conv2d(curr_numC, num_channels[i], 3, stride[i], 1),
+                                    norm_cfg=norm_cfg)]
+                curr_numC = num_channels[i]
+                layer.extend([BasicBlock(inplanes=curr_numC, planes=num_channels[i], stride=1,
+                                          downsample=None, norm_cfg=norm_cfg) for _ in range(num_layer[i] - 1)])
+                layers.append(nn.Sequential(*layer))
+        else:
+            assert False
+
+        self.layers = nn.Sequential(*layers)
+        self.with_cp = with_cp
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, C=60, Dy, Dx)
+        Returns:
+            feats: List[
+                (B, 32, Dy/2, Dx/2),  # feats[0]
+                (B, 64, Dy/4, Dx/4),  # feats[1]
+                (B, 32, Dy/8, Dx/8),  # feats[2] - 与feats[0]通道数匹配，可以拼接
+            ]
+        """
+        feats = []
+        x_tmp = x
+        for lid, layer in enumerate(self.layers):
+            if self.with_cp:
+                x_tmp = checkpoint.checkpoint(layer, x_tmp)
+            else:
+                x_tmp = layer(x_tmp)
+            if lid in self.backbone_output_ids:
+                feats.append(x_tmp)
+        return feats
+
+
 class BasicBlock3D(nn.Module):
     def __init__(self,
                  channels_in, channels_out, stride=1, downsample=None):

@@ -418,7 +418,7 @@ class DepthNet(nn.Module):
 class DepthAggregation(nn.Module):
     """pixel cloud feature extraction."""
 
-    def __init__(self, in_channels, mid_channels, out_channels):
+    def __init__(self, in_channels, mid_channels, out_channels, with_cp=False):
         super(DepthAggregation, self).__init__()
 
         self.reduce_conv = nn.Sequential(
@@ -465,12 +465,19 @@ class DepthAggregation(nn.Module):
             # nn.BatchNorm3d(out_channels),
             # nn.ReLU(inplace=True),
         )
+        self.with_cp = with_cp
 
     @autocast(False)
     def forward(self, x):
-        x = checkpoint(self.reduce_conv, x)
+        if self.with_cp:
+            x = checkpoint(self.reduce_conv, x)
+        else:
+            x = self.reduce_conv(x)
         short_cut = x
-        x = checkpoint(self.conv, x)
+        if self.with_cp:
+            x = checkpoint(self.conv, x)
+        else:
+            x = self.conv(x)
         x = short_cut + x
         x = self.out_conv(x)
         return x

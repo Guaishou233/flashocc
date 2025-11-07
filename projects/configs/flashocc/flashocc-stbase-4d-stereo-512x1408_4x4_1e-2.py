@@ -3,10 +3,12 @@ _base_ = ['../../../mmdetection3d/configs/_base_/datasets/nus-3d.py',
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
 
-# For nuScenes we usually do 10-class detection
+# For ScanNet we usually do 18-class detection
 class_names = [
-    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
-    'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+    'cabinet', 'bed', 'chair', 'sofa', 'table', 'door', 'window',
+               'bookshelf', 'picture', 'counter', 'desk', 'curtain',
+               'refrigerator', 'showercurtrain', 'toilet', 'sink', 'bathtub',
+               'garbagebin'
 ]
 
 data_config = {

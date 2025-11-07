@@ -330,8 +330,20 @@ class BEVOCCHead2D_V2(BaseModule):      # Use stronger loss setting
 
         self.class_balance = class_balance
         if self.class_balance:
-            class_weights = torch.from_numpy(1 / np.log(nusc_class_frequencies[:num_classes] + 0.001))
+            # 处理 num_classes 大于 nusc_class_frequencies 长度的情况
+            if num_classes <= len(nusc_class_frequencies):
+                class_weights = torch.from_numpy(1 / np.log(nusc_class_frequencies[:num_classes] + 0.001))
+            else:
+                # 如果 num_classes 大于 nusc_class_frequencies 的长度，使用已有的权重并填充默认值
+                available_weights = torch.from_numpy(1 / np.log(nusc_class_frequencies + 0.001))
+                # 使用最后一个权重的平均值作为默认值，或者使用 1.0
+                default_weight = available_weights.mean() if len(available_weights) > 0 else 1.0
+                class_weights = torch.ones(num_classes) * default_weight
+                class_weights[:len(available_weights)] = available_weights
             self.cls_weights = class_weights
+        else:
+            # 即使 class_balance=False，也初始化 cls_weights 为全 1，避免后续使用时出错
+            self.cls_weights = torch.ones(num_classes)
         self.loss_occ = build_loss(loss_occ)
 
     def forward(self, img_feats):

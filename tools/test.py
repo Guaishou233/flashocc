@@ -1,7 +1,11 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
 import os
+import sys
 import warnings
+
+# Add project root directory to Python path for importing tools module
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import mmcv
 import torch

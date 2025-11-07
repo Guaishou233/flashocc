@@ -191,9 +191,11 @@ class BEVDet(CenterPoint):
 
         num_augs = len(img_inputs)
         if num_augs != len(img_metas):
-            raise ValueError(
-                'num of augmentations ({}) != num of image meta ({})'.format(
-                    len(img_inputs), len(img_metas)))
+            # When num_augs != num_metas, use only the first augmentation
+            # This happens when test-time augmentation is applied but not properly configured
+            print(f'Warning: num of augmentations ({len(img_inputs)}) != num of image meta ({len(img_metas)}), using first augmentation only')
+            img_inputs = [img_inputs[0]]
+            num_augs = 1
 
         if not isinstance(img_inputs[0][0], list):
             img_inputs = [img_inputs] if img_inputs is None else img_inputs

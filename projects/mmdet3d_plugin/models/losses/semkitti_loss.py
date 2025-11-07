@@ -86,6 +86,22 @@ def geo_scal_loss(pred, ssc_target, ignore_index=255, non_empty_idx=0):
 
     # Remove unknown voxels
     mask = ssc_target != ignore_index
+    
+    # 处理mask的形状：如果是6维(B, 1, 1, Dx, Dy, Dz)，先reshape成4维(B, Dx, Dy, Dz)
+    if mask.dim() == 6:
+        # (B, 1, 1, Dx, Dy, Dz) -> (B, Dx, Dy, Dz)
+        mask = mask.squeeze(1).squeeze(1)
+        ssc_target = ssc_target.squeeze(1).squeeze(1)
+        empty_probs = empty_probs.squeeze(1).squeeze(1)
+        nonempty_probs = nonempty_probs.squeeze(1).squeeze(1)
+    elif mask.dim() == 5:
+        # 如果已经是5维，可能需要处理
+        if mask.size(1) == 1:
+            mask = mask.squeeze(1)
+            ssc_target = ssc_target.squeeze(1)
+            empty_probs = empty_probs.squeeze(1)
+            nonempty_probs = nonempty_probs.squeeze(1)
+    
     nonempty_target = ssc_target != non_empty_idx
     nonempty_target = nonempty_target[mask].float()
     nonempty_probs = nonempty_probs[mask]
@@ -111,6 +127,18 @@ def sem_scal_loss(pred_, ssc_target, ignore_index=255):
         loss = 0
         count = 0
         mask = ssc_target != ignore_index
+        
+        # 处理mask的形状：如果是6维(B, 1, 1, Dx, Dy, Dz)，先reshape成4维(B, Dx, Dy, Dz)
+        if mask.dim() == 6:
+            # (B, 1, 1, Dx, Dy, Dz) -> (B, Dx, Dy, Dz)
+            mask = mask.squeeze(1).squeeze(1)
+            ssc_target = ssc_target.squeeze(1).squeeze(1)
+        elif mask.dim() == 5:
+            # 如果已经是5维，可能需要处理
+            if mask.size(1) == 1:
+                mask = mask.squeeze(1)
+                ssc_target = ssc_target.squeeze(1)
+        
         n_classes = pred.shape[1]
         begin = 0
         for i in range(begin, n_classes-1):

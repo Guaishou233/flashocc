@@ -285,10 +285,10 @@ class LSSViewTransformer(BaseModule):
         B, N, D, H, W, _ = coor.shape
         num_points = B * N * D * H * W
         # record the index of selected points for acceleration purpose
-        ranks_depth = torch.range(
-            0, num_points - 1, dtype=torch.int, device=coor.device)    # (B*N*D*H*W, ), [0, 1, ..., B*N*D*fH*fW-1]
-        ranks_feat = torch.range(
-            0, num_points // D - 1, dtype=torch.int, device=coor.device)   # [0, 1, ...,B*N*fH*fW-1]
+        ranks_depth = torch.arange(
+            0, num_points, dtype=torch.int, device=coor.device)    # (B*N*D*H*W, ), [0, 1, ..., B*N*D*fH*fW-1]
+        ranks_feat = torch.arange(
+            0, num_points // D, dtype=torch.int, device=coor.device)   # [0, 1, ...,B*N*fH*fW-1]
         ranks_feat = ranks_feat.reshape(B, N, 1, H, W)
         ranks_feat = ranks_feat.expand(B, N, D, H, W).flatten()     # (B*N*D*fH*fW, )
 
@@ -298,7 +298,7 @@ class LSSViewTransformer(BaseModule):
                 self.grid_interval.to(coor))
         coor = coor.long().view(num_points, 3)      # (B, N, D, fH, fW, 3) --> (B*N*D*fH*fW, 3)
         # (B, N*D*fH*fW) --> (B*N*D*fH*fW, 1)
-        batch_idx = torch.range(0, B - 1).reshape(B, 1). \
+        batch_idx = torch.arange(0, B).reshape(B, 1). \
             expand(B, num_points // B).reshape(num_points, 1).to(coor)
         coor = torch.cat((coor, batch_idx), 1)      # (B*N*D*fH*fW, 4)   4: (x, y, z, batch_id)
 
@@ -379,7 +379,14 @@ class LSSViewTransformer(BaseModule):
             coor = self.get_ego_coor(*input[1:7])   # (B, N, D, fH, fW, 3)
             bev_feat = self.voxel_pooling_v2(
                 coor, depth.view(B, N, self.D, H, W),
-                tran_feat.view(B, N, self.out_channels, H, W))      # (B, C*Dz(=1), Dy, Dx)
+                tran_feat.view(B, N, self.out_channels, H, W))      # (B, C*Dz, Dy, Dx)
+            # Collapse Z dimension if collapse_z is True
+            if self.collapse_z:
+                # Reshape from (B, C*Dz, Dy, Dx) to (B, C, Dz, Dy, Dx) then squeeze Dz
+                C = self.out_channels
+                Dz = bev_feat.shape[1] // C
+                bev_feat = bev_feat.view(B, C, Dz, bev_feat.shape[2], bev_feat.shape[3])
+                bev_feat = bev_feat.squeeze(2)  # (B, C, Dy, Dx)
         return bev_feat, depth
 
     def view_transform(self, input, depth, tran_feat):
@@ -528,6 +535,12 @@ class LSSViewTransformerBEVDepth(LSSViewTransformer):
             gt_depths: (B*N_views*fH*fW, D)
         """
         B, N, H, W = gt_depths.shape
+        # 裁剪到能被downsample整除的尺寸
+        H_aligned = (H // self.downsample) * self.downsample
+        W_aligned = (W // self.downsample) * self.downsample
+        if H_aligned != H or W_aligned != W:
+            gt_depths = gt_depths[:, :, :H_aligned, :W_aligned]
+            H, W = H_aligned, W_aligned
         # (B*N_views, fH, downsample, fW, downsample, 1)
         gt_depths = gt_depths.view(B * N,
                                    H // self.downsample, self.downsample,
@@ -573,7 +586,20 @@ class LSSViewTransformerBEVDepth(LSSViewTransformer):
         Returns:
 
         """
+        # 获取原始输入尺寸，用于计算裁剪后的feature map尺寸
+        B, N, H, W = depth_labels.shape
+        H_aligned = (H // self.downsample) * self.downsample
+        W_aligned = (W // self.downsample) * self.downsample
+        fH_aligned = H_aligned // self.downsample
+        fW_aligned = W_aligned // self.downsample
+        
         depth_labels = self.get_downsampled_gt_depth(depth_labels)      # (B*N_views*fH*fW, D)
+        
+        # 裁剪depth_preds的feature map到与depth_labels相同的尺寸
+        B_pred, D_pred, fH_pred, fW_pred = depth_preds.shape
+        if fH_pred != fH_aligned or fW_pred != fW_aligned:
+            depth_preds = depth_preds[:, :, :fH_aligned, :fW_aligned]
+        
         # (B*N_views, D, fH, fW) --> (B*N_views, fH, fW, D) --> (B*N_views*fH*fW, D)
         depth_preds = depth_preds.permute(0, 2, 3,
                                           1).contiguous().view(-1, self.D)
